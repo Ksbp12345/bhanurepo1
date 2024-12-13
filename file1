@@ -1,0 +1,321 @@
+name: 'Ondemand Continuous Delivery'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select deployment environment"
+        required: true
+        default: "testing"
+        type: choice
+        options:
+          - testing
+          - staging
+          - production
+
+permissions:
+  actions: read
+  contents: read # clone repo
+  id-token: write # Required
+
+
+jobs:
+  ci-job:
+    name: '⚙️ Bake image'
+    runs-on: ubuntu-latest
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '☕️  Setup java'
+        uses: actions/setup-java@v3
+        with:
+          distribution: zulu
+          java-version-file: .java-version
+
+      - name: '🏭  Build and unit test'
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: wrapper
+          arguments: >
+            build
+
+      - name: '🐳  Bake and publish a11-api image'
+        uses: gradle/gradle-build-action@v2
+        if: github.ref_name == 'main' # only publish if on main
+        with:
+          gradle-version: wrapper
+          arguments: >
+            :a11-api:jib
+            -Djib.to.auth.username=mcs-availability-api-contributor
+            -Djib.to.auth.password=${{ secrets.MCS_ACR_PASSWORD }}
+            -Djib.to.tags=${{ github.sha }}
+
+      - name: '🐳  Bake and publish a11-cache image'
+        uses: gradle/gradle-build-action@v2
+        if: github.ref_name == 'main' # only publish if on main
+        with:
+          gradle-version: wrapper
+          arguments: >
+            :a11-cache:jib
+            -Djib.to.auth.username=mcs-availability-api-contributor
+            -Djib.to.auth.password=${{ secrets.MCS_ACR_PASSWORD }}
+            -Djib.to.tags=${{ github.sha }}
+
+      - name: '🐳  Bake and publish a11-search-feed-api image'
+        uses: gradle/gradle-build-action@v2
+        if: github.ref_name == 'main' # only publish if on main
+        with:
+          gradle-version: wrapper
+          arguments: >
+            :a11-search-feed-api:jib
+            -Djib.to.auth.username=mcs-availability-api-contributor
+            -Djib.to.auth.password=${{ secrets.MCS_ACR_PASSWORD }}
+            -Djib.to.tags=${{ github.sha }}
+
+      - name: '🐳  Bake and publish a11-search-feed-loader image'
+        uses: gradle/gradle-build-action@v2
+        if: github.ref_name == 'main' # only publish if on main
+        with:
+          gradle-version: wrapper
+          arguments: >
+            :a11-search-feed-loader:jib
+            -Djib.to.auth.username=mcs-availability-api-contributor
+            -Djib.to.auth.password=${{ secrets.MCS_ACR_PASSWORD }}
+            -Djib.to.tags=${{ github.sha }}
+
+      #- name: '📑  Upload build reports'
+      #  uses: actions/upload-artifact@v3
+      #  with:
+      #    name: build-reports
+      #    path: applications/**/build/reports/
+  dynamic-testing-job:
+    name: 'Conditional Testing Job'
+    if: ${{ github.event.inputs.environment == 'testing' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Prepare testing environment'
+        run: echo "Setting up testing environment"
+
+  dynamic-staging-job:
+    name: 'Conditional Staging Job'
+    if: ${{ github.event.inputs.environment == 'staging' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Prepare staging environment'
+        run: echo "Setting up staging environment"
+  
+  dynamic-production-job:
+    name: 'Conditional Production Job'
+    if: ${{ github.event.inputs.environment == 'production' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Prepare production environment'
+        run: echo "Setting up production environment"
+  
+  cd-job-testing:
+    name: '🚀️ Deploy testing environment'
+    needs:
+      - ci-job # deploy only after image is successfully created
+      - dynamic-testing-job
+    if: github.ref_name == 'main' # only deploy if on main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: testing
+      url: https://sit-api.npr.hm.com/availability/v1/health
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '💦️  Hydrate manifests'
+        uses: './.github/actions/hydrate'
+        with:
+          hapi_secrets: ${{ secrets.HAPI_SECRETS }}
+          azure_blob_secrets: ${{secrets.AZURE_BLOB_SECRETS}}
+          sqlserver_secrets: ${{secrets.SQLSERVER_SECRETS}}
+          store_attributes_secrets: ${{secrets.STORE_ATTRIBUTES_SECRETS}}
+
+      - name: '🚀️  Deploy testing environment to euwe npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: testing
+          cluster: euwe
+          tier: npr
+
+      - name: '🚀️  Deploy testing environment to use2 npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: testing
+          cluster: use2
+          tier: npr
+
+      - name: '🚀️  Deploy testing environment to asse npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: testing
+          cluster: asse
+          tier: npr
+
+  cd-job-staging:
+    name: '🚀️  Deploy staging environment'
+    needs:
+      - ci-job # deploy only after image is successfully created
+      - dynamic-staging-job
+    if: github.ref_name == 'main' # only deploy if on main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: staging
+      url: https://acc-api.npr.hm.com/availability/v1/health
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '💦️  Hydrate manifests'
+        uses: './.github/actions/hydrate'
+        with:
+          hapi_secrets: ${{ secrets.HAPI_SECRETS }}
+          azure_blob_secrets: ${{secrets.AZURE_BLOB_SECRETS}}
+          sqlserver_secrets: ${{secrets.SQLSERVER_SECRETS}}
+          store_attributes_secrets: ${{secrets.STORE_ATTRIBUTES_SECRETS}}
+
+      - name: '🚀️  Deploy staging environment to euwe npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: staging
+          cluster: euwe
+          tier: npr
+
+      - name: '🚀️  Deploy staging environment to use2 npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: staging
+          cluster: use2
+          tier: npr
+
+      - name: '🚀️  Deploy staging environment to asse npr cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: staging
+          cluster: asse
+          tier: npr
+  cd-job-performance:
+    name: '🚦  Run performance tests'
+    needs: 
+      - cd-job-staging # only run if staging environment was deployed
+      - at-job # only run if acceptance test was successful
+    runs-on: [PerformanceEngineering_SelfHosted]     
+    steps:
+      - name: 'Availability-automated-performance-test'
+        uses: hm-actions/automated-performance-test@main
+        with:
+          LoadTool: LoadRunner #Options LoadRunner/JMeter/Simple_Load_Test/DevWeb/K6
+          Performance_Testing_Folder: Performance-Testing          
+          Scenario_Label: Availability_LoadTest_ALL_API
+          ##################################### LoadRunner ######################################
+          # Parameters below necessary if the Load tool selected is LoadRunner.
+          # Performance Engineering team will assist in setting up the initial Project and Test scenario.
+          LoadRunner_Project: Availability_StoreDigitalLayer
+          LoadRunner_TestID: 181
+          LoadRunner_ClientID: I_KEY_3a89283b-3b16-45bc-bff0-7671f8c3529f
+          LoadRunner_ClientSecret: ${{ secrets.LoadRunner_ClientSecret }} #MUST BE ADDED AS A SECRET VARIABLE!!!
+          ###################### 2. Performance_KPI or Requirement checks #######################
+          Performance_KPI: False
+          Performance_KPI_Specs: |
+            Average Response Time, RespTimeAvg, 0.1, all
+            95th Percentile, RespTimePerc95, 1, Synthetic_2_Service
+          ################## Email #############################
+          Alert_Email: True
+          Alert_Email_ToAddress: abdelaziz.allam2@hm.com;subhajeet.mohanty@hm.com;siva.nadupuru@hm.com
+          ######## Publishing the result as a build artifact ###
+          PUB_Artifact: True
+          ################ Using SendGrid to send the emails ###
+          PUB_Email: True
+          PUB_Email_ToAddress: abdelaziz.allam2@hm.com;subhajeet.mohanty@hm.com;siva.nadupuru@hm.com
+  cd-job-production:
+    name: '🚀️  Deploy production environment'
+    needs:
+      - cd-job-performance # only deploy if performance environment was deployed
+      - at-job # only deploy if acceptance test was successful
+      - dynamic-production-job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production # an environment is protected by deployment protection rules
+      url: https://api.hm.com/availability/v1/health
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '💦️  Hydrate manifests'
+        uses: './.github/actions/hydrate'
+        with:
+          hapi_secrets: ${{ secrets.HAPI_SECRETS }}
+          azure_blob_secrets: ${{secrets.AZURE_BLOB_SECRETS}}
+          sqlserver_secrets: ${{secrets.SQLSERVER_SECRETS}}
+          store_attributes_secrets: ${{secrets.STORE_ATTRIBUTES_SECRETS}}
+
+      - name: '🚀️  Deploy production environment to euwe prd cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: production
+          cluster: euwe
+          tier: prd
+
+      - name: '🚀️  Deploy production environment to use2 prd cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: production
+          cluster: use2
+          tier: prd
+
+      - name: '🚀️  Deploy production environment to asse prd cluster'
+        uses: './.github/actions/deploy'
+        with:
+          environment: production
+          cluster: asse
+          tier: prd
+
+  ##################################################################################################
+  ##                                                                                              ##
+  ##                                      Dynamic testing                                         ##
+  ##                                                                                              ##
+  ##################################################################################################
+  at-job:
+    name: '🔬  Run acceptance tests'
+    needs: cd-job-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '🔬  Run tests on staging environment'
+        uses: './.github/actions/test'
+        with:
+          postman_environment: 25895014-b72b19eb-0ef2-4077-a668-002a08cda396
+          postman_api_key: ${{ secrets.POSTMAN_API_KEY }}
+
+  st-job:
+    name: '🔬  Run smoke tests'
+    needs: cd-job-production
+    runs-on: ubuntu-latest
+    steps:
+      - name: '🚚  Checkout repository'
+        uses: actions/checkout@v3
+
+      - name: '🔬  Run tests on production environment'
+        uses: './.github/actions/test'
+        with:
+          postman_environment: 25895014-4e05c01b-2ef5-4b3c-9d1a-3a514eb8cdba
+          postman_api_key: ${{ secrets.POSTMAN_API_KEY }}
+
